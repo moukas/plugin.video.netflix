@@ -199,6 +199,7 @@ def _convert_video_track(index, video_track, period, protection, has_drm_streams
         _add_protection_info(video_track, adaptation_set, **protection)
 
     limit_res = _limit_video_resolution(video_track['streams'], has_drm_streams)
+    count_representations = 0
 
     for downloadable in video_track['streams']:
         if downloadable['isDrm'] != has_drm_streams:
@@ -207,6 +208,18 @@ def _convert_video_track(index, video_track, period, protection, has_drm_streams
             if int(downloadable['res_h']) > limit_res:
                 continue
         _convert_video_downloadable(downloadable, adaptation_set, cdn_index)
+        count_representations += 1
+    if count_representations == 0 and limit_res:
+        LOG.warn('No video representation matched the resolution limit ({}p), trying without limit', limit_res)
+        for downloadable in video_track['streams']:
+            if downloadable['isDrm'] != has_drm_streams:
+                continue
+            _convert_video_downloadable(downloadable, adaptation_set, cdn_index)
+            count_representations += 1
+    if count_representations == 0:
+        LOG.error('No video representation available for track {}', index)
+        period.remove(adaptation_set)
+        return
     # Set the name to the AdaptationSet tag
     # this will become the name of the video stream, that can be read in the Kodi GUI on the video stream track list
     # and can be read also by using jsonrpc Player.GetProperties "videostreams" used by action_controller.py

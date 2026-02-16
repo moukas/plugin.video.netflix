@@ -70,10 +70,7 @@ class AMStreamContinuity(ActionManager):
         self.is_prefer_alternative_lang = G.ADDON.getSettingBool('prefer_alternative_lang')
 
     def on_playback_started(self, player_state):  # pylint: disable=too-many-branches
-        if player_state['nf_is_ads_stream']:
-            self.need_delay_init = True
-        else:
-            self._init(player_state)
+        self.need_delay_init = True
 
     def _init(self, player_state):  # pylint: disable=too-many-branches
         is_enabled = G.ADDON.getSettingBool('StreamContinuityManager_enabled')  # remember audio/subtitle preferences
@@ -84,6 +81,12 @@ class AMStreamContinuity(ActionManager):
         else:
             # Disable on_tick activity to check changes of settings
             self.enabled = False
+            return True
+        if (not player_state.get('currentvideostream') or
+                (player_state.get(STREAMS['audio']['list']) and not player_state.get(STREAMS['audio']['current'])) or
+                (player_state.get(STREAMS['subtitle']['list']) and not player_state.get(STREAMS['subtitle']['current']))):
+            LOG.debug('AMStreamContinuity: initialization delayed, player streams are not fully loaded yet')
+            return False
         if (player_state.get(STREAMS['subtitle']['current']) is None and
                 player_state.get('currentvideostream') is None):
             # KODI BUG! All Kodi v19 Matrix versions have the playlist bug, full fixed in version 20
@@ -93,8 +96,7 @@ class AMStreamContinuity(ActionManager):
                       'All Netflix add-on features has been now disabled and cannot be used.')
             ui.show_notification(title=common.get_local_string(30105),
                                  msg='A Kodi bug prevent to use Netflix features, please update to Kodi 20 or above.')
-            return
-        xbmc.sleep(500)  # Wait for slower systems
+            return True
         self.player_state = player_state
         # If the user has not changed the subtitle settings
         if self.sc_settings.get('subtitleenabled') is None:
@@ -149,13 +151,15 @@ class AMStreamContinuity(ActionManager):
             # It is mandatory to wait at least 1 second to allow the Kodi system to update the values
             # changed by restore, otherwise when on_tick is executed it will save twice unnecessarily
             xbmc.sleep(1000)
+        return True
 
     def on_tick(self, player_state):
         self.player_state = player_state
         if player_state['nf_is_ads_stream']:
             return
         if self.need_delay_init:
-            self._init(player_state)
+            if not self._init(player_state):
+                return
             self.need_delay_init = False
         # Check if the audio stream is changed
         current_stream = self.current_streams['audio']

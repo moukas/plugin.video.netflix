@@ -52,6 +52,7 @@ class ActionController(xbmc.Monitor):
         self._last_player_state = {}
         self._is_pause_called = False
         self._is_av_started = False
+        self._is_playback_started = False
         self._av_change_last_ts = None
         self._is_delayed_seek = False
         self._is_ads_plan = G.LOCAL_DB.get_value('is_ads_plan', None, table=TABLE_SESSION)
@@ -70,6 +71,7 @@ class ActionController(xbmc.Monitor):
     def _initialize_am(self):
         self._last_player_state = {}
         self._is_pause_called = False
+        self._is_playback_started = False
         self._av_change_last_ts = None
         self._is_delayed_seek = False
         if not self._init_data:
@@ -163,6 +165,7 @@ class ActionController(xbmc.Monitor):
             LOG.error(traceback.format_exc())
             self.is_tracking_enabled = False
             self._is_av_started = False
+            self._is_playback_started = False
             if self._playback_tick and self._playback_tick.is_alive():
                 self._playback_tick.stop_join()
                 self._playback_tick = None
@@ -175,6 +178,9 @@ class ActionController(xbmc.Monitor):
         if self.active_player_id is not None:
             player_state = self._get_player_state()
             if not player_state:
+                return
+            if not self._is_playback_started:
+                self._notify_playback_started(player_state)
                 return
             # If we are waiting for OnAVChange events, dont send call_on_tick otherwise will mix old/new player_state info
             if not self._av_change_last_ts:
@@ -193,12 +199,20 @@ class ActionController(xbmc.Monitor):
     def _on_avchange_delayed(self, player_state):
         self._notify_all(ActionManager.call_on_avchange_delayed, player_state)
 
-    def _on_playback_started(self):
-        player_id = _get_player_id()
-        self._notify_all(ActionManager.call_on_playback_started, self._get_player_state(player_id))
+    def _notify_playback_started(self, player_state):
+        self._notify_all(ActionManager.call_on_playback_started, player_state)
         if LOG.is_enabled and G.ADDON.getSettingBool('show_codec_info'):
             common.json_rpc('Input.ExecuteAction', {'action': 'codecinfo'})
+        self._is_playback_started = True
+
+    def _on_playback_started(self):
+        player_id = _get_player_id()
         self.active_player_id = player_id
+        player_state = self._get_player_state(player_id)
+        if not player_state:
+            LOG.debug('ActionController: playback start delayed, player state is not ready')
+            return
+        self._notify_playback_started(player_state)
 
     def _on_playback_seek(self, time_override):
         if self.active_player_id is not None:
@@ -233,6 +247,7 @@ class ActionController(xbmc.Monitor):
         self.action_managers = None
         self.init_count -= 1
         self._is_av_started = False
+        self._is_playback_started = False
 
     def _notify_all(self, notification, data=None):
         LOG.debug('Notifying all action managers of {} (data={})', notification.__name__, data)
@@ -284,6 +299,8 @@ class ActionController(xbmc.Monitor):
             return {}  # if audio stream has not been loaded yet, there is empty currentaudiostream
         if not player_state['currentsubtitle'] and player_state['subtitles']:
             return {}  # if subtitle stream has not been loaded yet, there is empty currentsubtitle
+        if not player_state['currentvideostream'] and player_state['videostreams']:
+            return {}  # if video stream has not been loaded yet, there is empty currentvideostream
         try:
             player_state['playerid'] = self.active_player_id if player_id is None else player_id
             # convert time dict to elapsed seconds
@@ -296,8 +313,11 @@ class ActionController(xbmc.Monitor):
                 elapsed_seconds = (time_override['hours'] * 3600 +
                                    time_override['minutes'] * 60 +
                                    time_override['seconds'])
-                player_state['percentage'] = player_state['percentage'] / player_state[
-                    'elapsed_seconds'] * elapsed_seconds
+                if player_state['elapsed_seconds'] > 0:
+                    player_state['percentage'] = player_state['percentage'] / player_state[
+                        'elapsed_seconds'] * elapsed_seconds
+                else:
+                    player_state['percentage'] = 0
                 player_state['elapsed_seconds'] = elapsed_seconds
 
             # Sometimes may happen that when you stop playback the player status is partial,
@@ -314,20 +334,28 @@ class ActionController(xbmc.Monitor):
 
             # Get additional video track info added in the track name
             # These info are come from "name" attribute of "AdaptationSet" tag in the DASH manifest (see converter.py)
-            video_stream = player_state['videostreams'][0]
+            video_stream = _get_selected_video_stream(player_state)
+            if not video_stream:
+                player_state['nf_video_crop_factor'] = None
+                player_state['nf_stream_videoid'] = None
+                player_state['nf_is_ads_stream'] = False
+                player_state['current_pts'] = player_state['elapsed_seconds']
+                player_state['nf_pts_offset'] = 0
+                return player_state
+            stream_name = video_stream.get('name', '')
             # Try to find the crop info from the track name
-            result = re.search(r'\(Crop (\d+\.\d+)\)', video_stream['name'])
+            result = re.search(r'\(Crop (\d+\.\d+)\)', stream_name)
             player_state['nf_video_crop_factor'] = float(result.group(1)) if result else None
             # Try to find the video id from the track name (may change if ADS video parts are played)
-            result = re.search(r'\(Id (\d+)(_[a-z]+)?\)', video_stream['name'])
+            result = re.search(r'\(Id (\d+)(_[a-z]+)?\)', stream_name)
             player_state['nf_stream_videoid'] = result.group(1) if result else None
             # Try to find the PTS offset from the track name
             #  The pts offset value is used with the ADS plan only, it provides the offset where the played chapter start
-            result = re.search(r'\(pts offset (\d+)\)', video_stream['name'])
+            result = re.search(r'\(pts offset (\d+)\)', stream_name)
             pts_offset = 0
             if result:
                 pts_offset = int(result.group(1))
-            player_state['nf_is_ads_stream'] = 'ads' in video_stream['name']
+            player_state['nf_is_ads_stream'] = 'ads' in stream_name
             # Since the JSON RPC Player.GetProperties can provide wrongly info of not yet played chapter (the next one)
             # to check if the info retrieved by Player.GetProperties are they really referred about what is displayed on
             # the screen or not, by checking if the "pts_offset" does not exceed the current time...
@@ -349,6 +377,19 @@ class ActionController(xbmc.Monitor):
             import traceback
             LOG.error(traceback.format_exc())
             return {}
+
+
+def _get_selected_video_stream(player_state):
+    current_video_stream = player_state.get('currentvideostream') or {}
+    if current_video_stream.get('name'):
+        return current_video_stream
+    stream_index = current_video_stream.get('index')
+    if stream_index is not None:
+        for video_stream in player_state.get('videostreams', []):
+            if video_stream.get('index') == stream_index:
+                return video_stream
+    video_streams = player_state.get('videostreams', [])
+    return video_streams[0] if video_streams else {}
 
 
 def _notify_managers(manager, notification, data):

@@ -50,7 +50,10 @@ def json_rpc(method, params=None):
     LOG.debug('Executing JSON-RPC: {}', request)
     raw_response = xbmc.executeJSONRPC(request)
     # debug('JSON-RPC response: {}'.format(raw_response))
-    response = json.loads(raw_response)
+    try:
+        response = json.loads(raw_response)
+    except (TypeError, ValueError) as exc:
+        raise IOError(f'JSONRPC-Error invalid response for "{method}": {raw_response!r}') from exc
     if 'error' in response:
         raise IOError(f'JSONRPC-Error {response["error"]["code"]}: {response["error"]["message"]}')
     return response['result']
@@ -139,7 +142,11 @@ def stop_playback():
 def get_current_kodi_profile_name(no_spaces=True):
     """Lazily gets the name of the Kodi profile currently used"""
     if not hasattr(get_current_kodi_profile_name, 'cached'):
-        name = json_rpc('Profiles.GetCurrentProfile', {'properties': ['thumbnail', 'lockmode']}).get('label', 'unknown')
+        try:
+            name = json_rpc('Profiles.GetCurrentProfile', {'properties': ['thumbnail', 'lockmode']}).get('label', 'unknown')
+        except Exception as exc:  # pylint: disable=broad-except
+            LOG.warn('Cannot get Kodi profile from JSON-RPC, fallback to "unknown": {}', exc)
+            name = 'unknown'
         get_current_kodi_profile_name.cached = name.replace(' ', '_') if no_spaces else name
     return get_current_kodi_profile_name.cached
 
