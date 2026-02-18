@@ -7,6 +7,8 @@
     SPDX-License-Identifier: MIT
     See LICENSES/MIT.md for more information.
 """
+from requests import exceptions as req_exceptions
+
 import resources.lib.common as common
 import resources.lib.kodi.ui as ui
 from resources.lib.common import cache_utils
@@ -237,6 +239,11 @@ def verify_profile_lock(guid, pin):
         return response.get('success') is True
     except HttpError401:  # Wrong PIN
         return False
+    except req_exceptions.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            LOG.warn('Profile PIN endpoint has been removed (HTTP 404), skipping PIN verification')
+            return True
+        raise
 
 
 def get_available_audio_languages():
